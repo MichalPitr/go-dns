@@ -28,6 +28,13 @@ type Body struct {
 	queryClass uint16
 }
 
+type Answer struct {
+	body     Body
+	ttl      uint32
+	rdLength uint16
+	rData    []byte
+}
+
 func (h Header) encode() ([]byte, error) {
 	// fixed size of header at 3 bytes
 	serialized := make([]byte, 12)
@@ -85,6 +92,88 @@ func (q Query) encode() ([]byte, error) {
 	return combined, nil
 }
 
+func decodeHeader(header []byte) (Header, error) {
+	h := Header{
+		id:      binary.BigEndian.Uint16(header[:2]),
+		flags:   binary.BigEndian.Uint16(header[2:4]),
+		qdCount: binary.BigEndian.Uint16(header[4:6]),
+		anCount: binary.BigEndian.Uint16(header[6:8]),
+		nsCount: binary.BigEndian.Uint16(header[8:10]),
+		arCount: binary.BigEndian.Uint16(header[10:12]),
+	}
+	return h, nil
+}
+
+func decodeBody(body []byte) (Body, int, error) {
+	s := ""
+	idx := 0
+	for {
+		length := int(body[idx])
+		name := body[idx+1 : idx+1+length]
+
+		idx += 1 + length
+
+		if body[idx] == 0x00 {
+			s += string(name)
+			// step over 0 octet
+			idx++
+			break
+		} else {
+			s += string(name) + "."
+		}
+	}
+	fmt.Println("idx:", idx)
+	b := Body{
+		question:   s,
+		queryType:  binary.BigEndian.Uint16(body[idx : idx+2]),
+		queryClass: binary.BigEndian.Uint16(body[idx+2 : idx+4]),
+	}
+	return b, idx + 4, nil
+}
+
+func decodeAnswer(answer []byte, names map[int]string) (Answer, int, error) {
+	isPointer := (answer[0]>>6)&0b11 == 3
+	name := ""
+	if isPointer {
+		// decode pointer stored in 14 LSBs
+		offset := binary.BigEndian.Uint16(answer[:2]) & 0x3FFF
+		name = names[int(offset)]
+	}
+	qType := binary.BigEndian.Uint16(answer[2:4])
+	qClass := binary.BigEndian.Uint16(answer[4:6])
+	ttl := binary.BigEndian.Uint32(answer[6:10])
+	rdLength := binary.BigEndian.Uint16(answer[10:12])
+	rData := answer[12 : 12+rdLength]
+	a := Answer{
+		Body{
+			question:   name,
+			queryType:  qType,
+			queryClass: qClass,
+		},
+		ttl,
+		rdLength,
+		rData,
+	}
+	return a, int(12 + rdLength), nil
+}
+
+func printBinary(payload []byte) {
+	for i, b := range payload {
+		// Print each byte in binary format
+		fmt.Printf("%08b ", b)
+
+		// Add a new line every 2 bytes to make it 16 bits per row
+		if (i+1)%2 == 0 {
+			fmt.Println()
+		}
+	}
+
+	// Handle the case where the length of byteArray is odd
+	if len(payload)%2 != 0 {
+		fmt.Println()
+	}
+}
+
 func main() {
 	//             Header            |||                  Body Message            || Qtype, Qclass
 	// 0016 0100 0001 0000 0000 0000 |||  0364 6e73 0667 6f6f 676c 6503 636f 6d00 || 0001 0001
@@ -130,4 +219,37 @@ func main() {
 		fmt.Printf("%02X ", b)
 	}
 	fmt.Println()
+
+	responseHeader, err := decodeHeader(buffer[:12])
+	if err != nil {
+		fmt.Println("Error decoding response header", err)
+		return
+	}
+
+	fmt.Printf("%+v\n", responseHeader)
+	fmt.Printf("%b\n", responseHeader.flags)
+	responseBody, size, err := decodeBody(buffer[12:])
+	if err != nil {
+		fmt.Println("Error decoding response body", err)
+		return
+	}
+
+	// cache offset of name for decompressing answer section
+	names := map[int]string{}
+	names[12] = responseBody.question
+
+	fmt.Printf("%+v\n", responseBody)
+	fmt.Printf("size: %d\n", size)
+
+	// printBinary(buffer[12+size:])
+	offset := 12 + size
+	for i := 0; i < int(responseHeader.anCount); i++ {
+		answer, size, err := decodeAnswer(buffer[offset:], names)
+		if err != nil {
+			fmt.Println("Error decoding response answer", err)
+			return
+		}
+		offset += size
+		fmt.Printf("%+v\n", answer)
+	}
 }
