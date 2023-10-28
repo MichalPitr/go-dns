@@ -105,6 +105,16 @@ func decodeHeader(header []byte) (Header, error) {
 }
 
 func decodeBody(body []byte) (Body, int, error) {
+	name, idx := decodeDomainName(body)
+	b := Body{
+		question:   name,
+		queryType:  binary.BigEndian.Uint16(body[idx : idx+2]),
+		queryClass: binary.BigEndian.Uint16(body[idx+2 : idx+4]),
+	}
+	return b, idx + 4, nil
+}
+
+func decodeDomainName(body []byte) (string, int) {
 	s := ""
 	idx := 0
 	for {
@@ -115,35 +125,35 @@ func decodeBody(body []byte) (Body, int, error) {
 
 		if body[idx] == 0x00 {
 			s += string(name)
-			// step over 0 octet
+
 			idx++
 			break
 		} else {
 			s += string(name) + "."
 		}
 	}
-	fmt.Println("idx:", idx)
-	b := Body{
-		question:   s,
-		queryType:  binary.BigEndian.Uint16(body[idx : idx+2]),
-		queryClass: binary.BigEndian.Uint16(body[idx+2 : idx+4]),
-	}
-	return b, idx + 4, nil
+	return s, idx
 }
 
 func decodeAnswer(answer []byte, names map[int]string) (Answer, int, error) {
-	isPointer := (answer[0]>>6)&0b11 == 3
+	pointerBits := (answer[0] >> 6) & 0b11
 	name := ""
-	if isPointer {
+	idx := 2
+	if pointerBits == 3 {
 		// decode pointer stored in 14 LSBs
 		offset := binary.BigEndian.Uint16(answer[:2]) & 0x3FFF
 		name = names[int(offset)]
+	} else if pointerBits == 0 {
+		name, idx = decodeDomainName(answer[2:])
+	} else {
+		return Answer{}, 0, fmt.Errorf("Unexpected pointer bits in answer. Only '00' and '11' are supported.")
 	}
-	qType := binary.BigEndian.Uint16(answer[2:4])
-	qClass := binary.BigEndian.Uint16(answer[4:6])
-	ttl := binary.BigEndian.Uint32(answer[6:10])
-	rdLength := binary.BigEndian.Uint16(answer[10:12])
-	rData := answer[12 : 12+rdLength]
+
+	qType := binary.BigEndian.Uint16(answer[idx : 2+idx])
+	qClass := binary.BigEndian.Uint16(answer[2+idx : 4+idx])
+	ttl := binary.BigEndian.Uint32(answer[4+idx : 8+idx])
+	rdLength := binary.BigEndian.Uint16(answer[8+idx : 10+idx])
+	rData := answer[10+idx : 10+uint16(idx)+rdLength]
 	a := Answer{
 		Body{
 			question:   name,
@@ -154,7 +164,7 @@ func decodeAnswer(answer []byte, names map[int]string) (Answer, int, error) {
 		rdLength,
 		rData,
 	}
-	return a, int(12 + rdLength), nil
+	return a, idx + int(10+rdLength), nil
 }
 
 func printBinary(payload []byte) {
