@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
-	"math"
 	"net"
 	"strings"
 )
@@ -105,7 +104,7 @@ func decodeHeader(header []byte) (Header, error) {
 }
 
 func decodeBody(body []byte) (Body, int, error) {
-	name, idx := decodeDomainName(body)
+	name, idx := decodeDomainName(12)
 	b := Body{
 		question:   name,
 		queryType:  binary.BigEndian.Uint16(body[idx : idx+2]),
@@ -114,16 +113,17 @@ func decodeBody(body []byte) (Body, int, error) {
 	return b, idx + 4, nil
 }
 
-func decodeDomainName(body []byte) (string, int) {
+func decodeDomainName(offset int) (string, int) {
 	s := ""
-	idx := 0
+	idx := offset
+
 	for {
-		length := int(body[idx])
-		name := body[idx+1 : idx+1+length]
+		length := int(buffer[idx])
+		name := buffer[idx+1 : idx+1+length]
 
 		idx += 1 + length
 
-		if body[idx] == 0x00 {
+		if buffer[idx] == 0x00 {
 			s += string(name)
 
 			idx++
@@ -132,20 +132,24 @@ func decodeDomainName(body []byte) (string, int) {
 			s += string(name) + "."
 		}
 	}
-	return s, idx
+	return s, idx - offset
 }
 
-func decodeAnswer(answer []byte, names map[int]string) (Answer, int, error) {
+func decodeAnswer(answer []byte, offset int) (Answer, int, error) {
 	pointerBits := (answer[0] >> 6) & 0b11
 	name := ""
 	idx := 2
 	if pointerBits == 3 {
 		// decode pointer stored in 14 LSBs
+		fmt.Printf("%b\n", answer[:2])
 		offset := binary.BigEndian.Uint16(answer[:2]) & 0x3FFF
-		name = names[int(offset)]
+		fmt.Println("pointer offset", offset)
+		fmt.Println()
+		name, _ = decodeDomainName(int(offset))
 	} else if pointerBits == 0 {
-		name, idx = decodeDomainName(answer[2:])
+		name, idx = decodeDomainName(offset)
 	} else {
+		fmt.Println("Error.")
 		return Answer{}, 0, fmt.Errorf("Unexpected pointer bits in answer. Only '00' and '11' are supported.")
 	}
 
@@ -184,27 +188,31 @@ func printBinary(payload []byte) {
 	}
 }
 
+var buffer = []byte{}
+
 func main() {
 	//             Header            |||                  Body Message            || Qtype, Qclass
 	// 0016 0100 0001 0000 0000 0000 |||  0364 6e73 0667 6f6f 676c 6503 636f 6d00 || 0001 0001
 	q := Query{
-		header: Header{id: 22, flags: uint16(math.Pow(16, 2)), qdCount: 1, anCount: 0, nsCount: 0, arCount: 0},
+		header: Header{id: 22, flags: 0, qdCount: 1, anCount: 0, nsCount: 0, arCount: 0},
 		body:   Body{question: "dns.google.com", queryType: 1, queryClass: 1},
 	}
-
+	fmt.Printf("query: %+v\n", q)
 	message, err := q.encode()
 	if err != nil {
 		fmt.Println(err.Error())
 		return
 	}
-	fmt.Println(message)
-	for _, b := range message {
-		fmt.Printf("%02X ", b)
-	}
-	fmt.Println()
+
+	// fmt.Println(message)
+	// for _, b := range message {
+	// 	fmt.Printf("%02X ", b)
+	// }
+	// fmt.Println()
 
 	// sending udp message
-	serverIP := "8.8.8.8:53"
+	// authoritative root name server
+	serverIP := "198.41.0.4:53"
 	conn, err := net.Dial("udp", serverIP)
 	if err != nil {
 		fmt.Println("Error setting up the UDP connection:", err)
@@ -218,17 +226,17 @@ func main() {
 		return
 	}
 
-	buffer := make([]byte, 1024)
-	n, err := conn.Read(buffer)
+	buffer = make([]byte, 1024)
+	_, err = conn.Read(buffer)
 	if err != nil {
 		fmt.Println("Error reading from udp:", err)
 		return
 	}
 
-	for _, b := range buffer[:n] {
-		fmt.Printf("%02X ", b)
-	}
-	fmt.Println()
+	// for _, b := range buffer[:n] {
+	// 	fmt.Printf("%02X ", b)
+	// }
+	// fmt.Println()
 
 	responseHeader, err := decodeHeader(buffer[:12])
 	if err != nil {
@@ -236,8 +244,9 @@ func main() {
 		return
 	}
 
-	fmt.Printf("%+v\n", responseHeader)
 	fmt.Printf("%b\n", responseHeader.flags)
+
+	fmt.Printf("response header: %+v\n", responseHeader)
 	responseBody, size, err := decodeBody(buffer[12:])
 	if err != nil {
 		fmt.Println("Error decoding response body", err)
@@ -248,18 +257,40 @@ func main() {
 	names := map[int]string{}
 	names[12] = responseBody.question
 
-	fmt.Printf("%+v\n", responseBody)
-	fmt.Printf("size: %d\n", size)
+	fmt.Printf("response body: %+v\n", responseBody)
 
 	// printBinary(buffer[12+size:])
 	offset := 12 + size
 	for i := 0; i < int(responseHeader.anCount); i++ {
-		answer, size, err := decodeAnswer(buffer[offset:], names)
+		answer, size, err := decodeAnswer(buffer[offset:], offset)
 		if err != nil {
 			fmt.Println("Error decoding response answer", err)
 			return
 		}
 		offset += size
-		fmt.Printf("%+v\n", answer)
+		fmt.Printf("response an: %+v\n", answer)
 	}
+
+	for i := 0; i < int(responseHeader.nsCount); i++ {
+		answer, size, err := decodeAnswer(buffer[offset:], offset)
+		if err != nil {
+			fmt.Println("Error decoding response answer", err)
+			return
+		}
+		offset += size
+		fmt.Printf("response ns: %+v\n", answer)
+	}
+
+	for i := 0; i < int(responseHeader.arCount); i++ {
+		answer, size, err := decodeAnswer(buffer[offset:], offset)
+		if err != nil {
+			fmt.Println("Error decoding response answer", err)
+			return
+		}
+		offset += size
+		fmt.Printf("response ar: %+v\n", answer)
+	}
+
+	s, _ := decodeDomainName(23)
+	fmt.Println(s)
 }

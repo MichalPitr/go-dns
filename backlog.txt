@@ -1,0 +1,4 @@
+Decide next query based on responses.
+
+-- Done
+fix name compression when not pointing to the start of a full name (i.e. suffixes)
