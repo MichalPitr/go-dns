@@ -235,8 +235,12 @@ func printBinary(payload []byte) {
 	}
 }
 
-// Global variable so that we don't have to pass it around
+// Global variables to avoid passing vars around
 var buffer = []byte{}
+var verbose = false
+
+const udpMaxPacketSize = 512
+const defaultRootNameServer = "192.203.230.10"
 
 func resolveDomainName(domainName string, nameServer string) (string, error) {
 	q := Query{
@@ -244,7 +248,6 @@ func resolveDomainName(domainName string, nameServer string) (string, error) {
 		body:   Body{question: domainName, queryType: 1, queryClass: 1},
 	}
 
-	fmt.Printf("query: %+v\n", q)
 	message, err := q.encode()
 	if err != nil {
 		return "", err
@@ -252,7 +255,9 @@ func resolveDomainName(domainName string, nameServer string) (string, error) {
 
 	// sending udp message
 	// authoritative root name server
-	serverIP := "192.203.230.10"
+	serverIP := defaultRootNameServer
+
+	// Keep track of servers already queried to avoid cycles.
 	visited := map[string]struct{}{}
 	visited[serverIP] = struct{}{}
 	stack := Stack{serverIP}
@@ -262,7 +267,6 @@ func resolveDomainName(domainName string, nameServer string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		// fmt.Println(stack)
 		conn, err := net.Dial("udp", fmt.Sprintf("%s:53", ip))
 		if err != nil {
 			return "", err
@@ -275,7 +279,7 @@ func resolveDomainName(domainName string, nameServer string) (string, error) {
 			return "", err
 		}
 
-		buffer = make([]byte, 1024)
+		buffer = make([]byte, udpMaxPacketSize)
 		_, err = conn.Read(buffer)
 		if err != nil {
 			return "", err
@@ -285,17 +289,18 @@ func resolveDomainName(domainName string, nameServer string) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		if responseHeader.id != q.header.id {
+			return "", fmt.Errorf("Expected response with id '%d' but got '%d' instead.", q.header.id, responseHeader.id)
+		}
 
 		if responseHeader.anCount+responseHeader.nsCount+responseHeader.arCount == 0 {
 			return "", fmt.Errorf("No records received from server.")
 		}
 
-		fmt.Printf("response header: %+v\n", responseHeader)
 		responseBody, size, err := decodeBody(buffer[12:])
-		if err != nil {
+		if err != nil || responseBody.question != q.body.question {
 			return "", err
 		}
-		fmt.Printf("response body: %+v\n", responseBody)
 
 		offset := 12 + size
 		for i := 0; i < int(responseHeader.anCount); i++ {
@@ -304,8 +309,6 @@ func resolveDomainName(domainName string, nameServer string) (string, error) {
 				return "", err
 			}
 			return fmt.Sprintf("%d.%d.%d.%d", answer.rData[0], answer.rData[1], answer.rData[2], answer.rData[3]), nil
-			// offset += size
-			// fmt.Printf("response an: %+v\n", answer)
 		}
 
 		authorityRecords := make([]Resource, 0)
@@ -316,7 +319,6 @@ func resolveDomainName(domainName string, nameServer string) (string, error) {
 			}
 			authorityRecords = append(authorityRecords, answer)
 			offset += size
-			fmt.Printf("response ns: %+v\n", answer)
 		}
 
 		additionalRecords := make([]Resource, 0)
@@ -325,7 +327,6 @@ func resolveDomainName(domainName string, nameServer string) (string, error) {
 			if err != nil {
 				return "", err
 			}
-			fmt.Printf("response ar: %+v\n", answer)
 			additionalRecords = append(additionalRecords, answer)
 			offset += size
 		}
@@ -344,7 +345,6 @@ func resolveDomainName(domainName string, nameServer string) (string, error) {
 
 		// Resolve name server's ip
 		if len(stack) == 0 {
-			fmt.Println("Resolving name server ip...", string(authorityRecords[0].rData))
 			nameServer, err := resolveDomainName(string(authorityRecords[0].rData), serverIP)
 			if err != nil {
 				return "", err
@@ -359,22 +359,16 @@ func resolveDomainName(domainName string, nameServer string) (string, error) {
 func main() {
 	args := os.Args[1:]
 	if len(args) != 1 {
-		fmt.Println("Usage: dns.go domain")
+		fmt.Println("Usage: ./dns domain")
 		os.Exit(0)
 	}
 
-	//             Header            |||                  Body Message            || Qtype, Qclass
-	// 0016 0100 0001 0000 0000 0000 |||  0364 6e73 0667 6f6f 676c 6503 636f 6d00 || 0001 0001
 	domain, err := resolveDomainName(args[0], "192.203.230.10")
 	if err != nil {
 		fmt.Println(err.Error())
 		os.Exit(1)
 	}
+
 	fmt.Println(domain)
 	return
-
-	// s, _ := decodeDomainName(76)
-	// fmt.Println(s)
-	// fmt.Printf("%b\n", buffer[76:100])
-	// printBinary(buffer)
 }
