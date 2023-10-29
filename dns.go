@@ -27,7 +27,7 @@ type Body struct {
 	queryClass uint16
 }
 
-type Answer struct {
+type Resource struct {
 	body     Body
 	ttl      uint32
 	rdLength uint16
@@ -144,14 +144,14 @@ func decodeDomainName(offset int) (string, int) {
 	return s, idx - offset
 }
 
-func decodeAnswer(answer []byte, offset int) (Answer, int, error) {
+func decodeResource(answer []byte, offset int) (Resource, int, error) {
 	name, idx := decodeDomainName(offset)
 	qType := binary.BigEndian.Uint16(answer[idx : 2+idx])
 	qClass := binary.BigEndian.Uint16(answer[2+idx : 4+idx])
 	ttl := binary.BigEndian.Uint32(answer[4+idx : 8+idx])
 	rdLength := binary.BigEndian.Uint16(answer[8+idx : 10+idx])
 	rData := answer[10+idx : 10+uint16(idx)+rdLength]
-	a := Answer{
+	a := Resource{
 		Body{
 			question:   name,
 			queryType:  qType,
@@ -209,86 +209,104 @@ func main() {
 	// sending udp message
 	// authoritative root name server
 	serverIP := "198.41.0.4:53"
-	conn, err := net.Dial("udp", serverIP)
-	if err != nil {
-		fmt.Println("Error setting up the UDP connection:", err)
-		return
-	}
-	defer conn.Close()
 
-	_, err = conn.Write(message)
-	if err != nil {
-		fmt.Println("Error sending message:", err)
-		return
-	}
-
-	buffer = make([]byte, 1024)
-	_, err = conn.Read(buffer)
-	if err != nil {
-		fmt.Println("Error reading from udp:", err)
-		return
-	}
-
-	// for _, b := range buffer[:n] {
-	// 	fmt.Printf("%02X ", b)
-	// }
-	// fmt.Println()
-
-	responseHeader, err := decodeHeader(buffer[:12])
-	if err != nil {
-		fmt.Println("Error decoding response header", err)
-		return
-	}
-
-	fmt.Printf("%b\n", responseHeader.flags)
-
-	fmt.Printf("response header: %+v\n", responseHeader)
-	responseBody, size, err := decodeBody(buffer[12:])
-	if err != nil {
-		fmt.Println("Error decoding response body", err)
-		return
-	}
-
-	// cache offset of name for decompressing answer section
-	names := map[int]string{}
-	names[12] = responseBody.question
-
-	fmt.Printf("response body: %+v\n", responseBody)
-
-	// printBinary(buffer[12+size:])
-	offset := 12 + size
-	for i := 0; i < int(responseHeader.anCount); i++ {
-		answer, size, err := decodeAnswer(buffer[offset:], offset)
+	for {
+		conn, err := net.Dial("udp", serverIP)
 		if err != nil {
-			fmt.Println("Error decoding response answer", err)
+			fmt.Println("Error setting up the UDP connection:", err)
 			return
 		}
-		offset += size
-		fmt.Printf("response an: %+v\n", answer)
-	}
+		defer conn.Close()
 
-	for i := 0; i < int(responseHeader.nsCount); i++ {
-		answer, size, err := decodeAnswer(buffer[offset:], offset)
+		_, err = conn.Write(message)
 		if err != nil {
-			fmt.Println("Error decoding response answer", err)
+			fmt.Println("Error sending message:", err)
 			return
 		}
-		offset += size
-		fmt.Printf("response ns: %+v\n", answer)
-	}
 
-	for i := 0; i < int(responseHeader.arCount); i++ {
-		answer, size, err := decodeAnswer(buffer[offset:], offset)
+		buffer = make([]byte, 1024)
+		_, err = conn.Read(buffer)
 		if err != nil {
-			fmt.Println("Error decoding response answer", err)
+			fmt.Println("Error reading from udp:", err)
 			return
 		}
-		offset += size
-		fmt.Printf("response ar: %+v\n", answer)
+
+		responseHeader, err := decodeHeader(buffer[:12])
+		if err != nil {
+			fmt.Println("Error decoding response header", err)
+			return
+		}
+
+		fmt.Printf("%b\n", responseHeader.flags)
+
+		fmt.Printf("response header: %+v\n", responseHeader)
+		responseBody, size, err := decodeBody(buffer[12:])
+		if err != nil {
+			fmt.Println("Error decoding response body", err)
+			return
+		}
+
+		// cache offset of name for decompressing answer section
+		names := map[int]string{}
+		names[12] = responseBody.question
+
+		fmt.Printf("response body: %+v\n", responseBody)
+
+		// printBinary(buffer[12+size:])
+		offset := 12 + size
+		answerRecords := make([]Resource, 0)
+		for i := 0; i < int(responseHeader.anCount); i++ {
+			answer, size, err := decodeResource(buffer[offset:], offset)
+			if err != nil {
+				fmt.Println("Error decoding response answer", err)
+				return
+			}
+			answerRecords = append(answerRecords, answer)
+			offset += size
+			fmt.Printf("response an: %+v\n", answer)
+		}
+		if len(answerRecords) > 0 {
+			return
+		}
+
+		authorityRecords := make([]Resource, 0)
+		for i := 0; i < int(responseHeader.nsCount); i++ {
+			answer, size, err := decodeResource(buffer[offset:], offset)
+			if err != nil {
+				fmt.Println("Error decoding response answer", err)
+				return
+			}
+			authorityRecords = append(authorityRecords, answer)
+			offset += size
+			fmt.Printf("response ns: %+v\n", answer)
+		}
+
+		additionalReconds := make([]Resource, 0)
+		for i := 0; i < int(responseHeader.arCount); i++ {
+			answer, size, err := decodeResource(buffer[offset:], offset)
+			if err != nil {
+				fmt.Println("Error decoding response answer", err)
+				return
+			}
+			additionalReconds = append(additionalReconds, answer)
+			offset += size
+			fmt.Printf("response ar: %+v\n", answer)
+		}
+
+		if len(additionalReconds) > 0 {
+			for i := range additionalReconds {
+				// We have ipv4 address for server that can help resolve the query
+				ar := additionalReconds[i]
+				if ar.body.queryType == 1 && ar.body.queryClass == 1 && ar.rdLength == 4 {
+					serverIP = fmt.Sprintf("%d.%d.%d.%d:53", ar.rData[0], ar.rData[1], ar.rData[2], ar.rData[3])
+					break
+				}
+			}
+		}
 	}
 
-	s, _ := decodeDomainName(76)
-	fmt.Println(s)
+	// s, _ := decodeDomainName(76)
+	// fmt.Println(s)
 	// fmt.Printf("%b\n", buffer[76:100])
-	printBinary(buffer)
+	// printBinary(buffer)
 }
