@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 )
 
@@ -198,7 +199,6 @@ func decodeResource(answer []byte, offset int) (Resource, int, error) {
 	rData := []byte{}
 	if qType == 2 && qClass == 1 {
 		rData = []byte(decodeNSrData(answer[10+idx : 10+uint16(idx)+rdLength]))
-		fmt.Println(rData)
 	} else {
 		rData = answer[10+idx : 10+uint16(idx)+rdLength]
 	}
@@ -238,7 +238,7 @@ func printBinary(payload []byte) {
 // Global variable so that we don't have to pass it around
 var buffer = []byte{}
 
-func resolveDomainName(domainName string) (string, error) {
+func resolveDomainName(domainName string, nameServer string) (string, error) {
 	q := Query{
 		header: Header{id: 22, flags: 0, qdCount: 1, anCount: 0, nsCount: 0, arCount: 0},
 		body:   Body{question: domainName, queryType: 1, queryClass: 1},
@@ -262,7 +262,7 @@ func resolveDomainName(domainName string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		fmt.Println(stack)
+		// fmt.Println(stack)
 		conn, err := net.Dial("udp", fmt.Sprintf("%s:53", ip))
 		if err != nil {
 			return "", err
@@ -319,20 +319,20 @@ func resolveDomainName(domainName string) (string, error) {
 			fmt.Printf("response ns: %+v\n", answer)
 		}
 
-		additionalReconds := make([]Resource, 0)
+		additionalRecords := make([]Resource, 0)
 		for i := 0; i < int(responseHeader.arCount); i++ {
 			answer, size, err := decodeResource(buffer[offset:], offset)
 			if err != nil {
 				return "", err
 			}
-			additionalReconds = append(additionalReconds, answer)
-			offset += size
 			fmt.Printf("response ar: %+v\n", answer)
+			additionalRecords = append(additionalRecords, answer)
+			offset += size
 		}
 
-		for i := range additionalReconds {
+		for i := range additionalRecords {
 			// We have ipv4 address for server that can help resolve the query
-			ar := additionalReconds[i]
+			ar := additionalRecords[i]
 			if ar.body.queryType == 1 && ar.body.queryClass == 1 && ar.rdLength == 4 {
 				newIP := fmt.Sprintf("%d.%d.%d.%d", ar.rData[0], ar.rData[1], ar.rData[2], ar.rData[3])
 				if _, exists := visited[newIP]; !exists {
@@ -341,16 +341,34 @@ func resolveDomainName(domainName string) (string, error) {
 				}
 			}
 		}
+
+		// Resolve name server's ip
+		if len(stack) == 0 {
+			fmt.Println("Resolving name server ip...", string(authorityRecords[0].rData))
+			nameServer, err := resolveDomainName(string(authorityRecords[0].rData), serverIP)
+			if err != nil {
+				return "", err
+			}
+			stack.Push(nameServer)
+		}
+
 	}
 	return "", fmt.Errorf("Failed to resolve this domain name.")
 }
 
 func main() {
+	args := os.Args[1:]
+	if len(args) != 1 {
+		fmt.Println("Usage: dns.go domain")
+		os.Exit(0)
+	}
+
 	//             Header            |||                  Body Message            || Qtype, Qclass
 	// 0016 0100 0001 0000 0000 0000 |||  0364 6e73 0667 6f6f 676c 6503 636f 6d00 || 0001 0001
-	domain, err := resolveDomainName("threads.net")
+	domain, err := resolveDomainName(args[0], "192.203.230.10")
 	if err != nil {
 		fmt.Println(err.Error())
+		os.Exit(1)
 	}
 	fmt.Println(domain)
 	return
