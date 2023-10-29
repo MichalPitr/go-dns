@@ -1,6 +1,6 @@
-Support resolving name servers if no ip returned.
 
 -- Done
 fix name compression when not pointing to the start of a full name (i.e. suffixes)
 fix Compression - message followed by pointer 
 Decide next query based on responses.
+Support resolving name servers if no ip returned.
