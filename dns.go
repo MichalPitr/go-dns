@@ -139,12 +139,10 @@ func decodeDomainName(offset int) (string, int) {
 
 	for {
 		length := int(buffer[idx])
-		fmt.Println("Len: ", length)
 		// length 192 indicates a pointer
 		if length == 192 {
 			// pointer to a string
 			suffix, _ := decodeDomainName(int(buffer[idx+1]))
-			fmt.Println("Pointer at idx:", int(buffer[idx+1]), suffix)
 			s += suffix
 			idx += 2
 			break
@@ -168,12 +166,10 @@ func decodeNSrData(rdata []byte) string {
 	idx := 0
 	for {
 		length := int(rdata[idx])
-		fmt.Println("Len: ", length)
 		// length 192 indicates a pointer
 		if length == 192 {
 			// pointer to a string in the original response buffer
 			suffix, _ := decodeDomainName(int(rdata[idx+1]))
-			fmt.Println("Pointer at idx:", int(rdata[idx+1]), suffix)
 			s += suffix
 			idx += 2
 			break
@@ -242,19 +238,16 @@ func printBinary(payload []byte) {
 // Global variable so that we don't have to pass it around
 var buffer = []byte{}
 
-func main() {
-	//             Header            |||                  Body Message            || Qtype, Qclass
-	// 0016 0100 0001 0000 0000 0000 |||  0364 6e73 0667 6f6f 676c 6503 636f 6d00 || 0001 0001
-	domain := "threads.net"
+func resolveDomainName(domainName string) (string, error) {
 	q := Query{
 		header: Header{id: 22, flags: 0, qdCount: 1, anCount: 0, nsCount: 0, arCount: 0},
-		body:   Body{question: domain, queryType: 1, queryClass: 1},
+		body:   Body{question: domainName, queryType: 1, queryClass: 1},
 	}
+
 	fmt.Printf("query: %+v\n", q)
 	message, err := q.encode()
 	if err != nil {
-		fmt.Println(err.Error())
-		return
+		return "", err
 	}
 
 	// sending udp message
@@ -267,70 +260,59 @@ func main() {
 	for len(stack) > 0 {
 		ip, err := stack.Pop()
 		if err != nil {
-			fmt.Println(err)
-			return
+			return "", err
 		}
 		fmt.Println(stack)
 		conn, err := net.Dial("udp", fmt.Sprintf("%s:53", ip))
 		if err != nil {
-			fmt.Println("Error setting up the UDP connection:", err)
-			return
+			return "", err
 		}
 		defer conn.Close()
-		fmt.Printf("Querying %s for %s\n", ip, domain)
+
+		fmt.Printf("Querying %s for %s\n", ip, domainName)
 		_, err = conn.Write(message)
 		if err != nil {
-			fmt.Println("Error sending message:", err)
-			return
+			return "", err
 		}
 
 		buffer = make([]byte, 1024)
 		_, err = conn.Read(buffer)
 		if err != nil {
-			fmt.Println("Error reading from udp:", err)
-			return
+			return "", err
 		}
 
 		responseHeader, err := decodeHeader(buffer[:12])
 		if err != nil {
-			fmt.Println("Error decoding response header", err)
-			return
+			return "", err
 		}
+
 		if responseHeader.anCount+responseHeader.nsCount+responseHeader.arCount == 0 {
-			fmt.Println("No records received from server.")
-			return
+			return "", fmt.Errorf("No records received from server.")
 		}
 
 		fmt.Printf("response header: %+v\n", responseHeader)
 		responseBody, size, err := decodeBody(buffer[12:])
 		if err != nil {
-			fmt.Println("Error decoding response body", err)
-			return
+			return "", err
 		}
 		fmt.Printf("response body: %+v\n", responseBody)
 
 		offset := 12 + size
-		answerRecords := make([]Resource, 0)
 		for i := 0; i < int(responseHeader.anCount); i++ {
-			answer, size, err := decodeResource(buffer[offset:], offset)
+			answer, _, err := decodeResource(buffer[offset:], offset)
 			if err != nil {
-				fmt.Println("Error decoding response answer", err)
-				return
+				return "", err
 			}
-			answerRecords = append(answerRecords, answer)
-			offset += size
-			fmt.Printf("response an: %+v\n", answer)
-		}
-		if len(answerRecords) > 0 {
-			return
+			return fmt.Sprintf("%d.%d.%d.%d", answer.rData[0], answer.rData[1], answer.rData[2], answer.rData[3]), nil
+			// offset += size
+			// fmt.Printf("response an: %+v\n", answer)
 		}
 
 		authorityRecords := make([]Resource, 0)
 		for i := 0; i < int(responseHeader.nsCount); i++ {
 			answer, size, err := decodeResource(buffer[offset:], offset)
 			if err != nil {
-				fmt.Println("Error decoding response answer", err)
-				return
+				return "", err
 			}
 			authorityRecords = append(authorityRecords, answer)
 			offset += size
@@ -341,8 +323,7 @@ func main() {
 		for i := 0; i < int(responseHeader.arCount); i++ {
 			answer, size, err := decodeResource(buffer[offset:], offset)
 			if err != nil {
-				fmt.Println("Error decoding response answer", err)
-				return
+				return "", err
 			}
 			additionalReconds = append(additionalReconds, answer)
 			offset += size
@@ -361,6 +342,18 @@ func main() {
 			}
 		}
 	}
+	return "", fmt.Errorf("Failed to resolve this domain name.")
+}
+
+func main() {
+	//             Header            |||                  Body Message            || Qtype, Qclass
+	// 0016 0100 0001 0000 0000 0000 |||  0364 6e73 0667 6f6f 676c 6503 636f 6d00 || 0001 0001
+	domain, err := resolveDomainName("threads.net")
+	if err != nil {
+		fmt.Println(err.Error())
+	}
+	fmt.Println(domain)
+	return
 
 	// s, _ := decodeDomainName(76)
 	// fmt.Println(s)
