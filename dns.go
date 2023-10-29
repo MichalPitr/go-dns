@@ -119,40 +119,33 @@ func decodeDomainName(offset int) (string, int) {
 
 	for {
 		length := int(buffer[idx])
-		name := buffer[idx+1 : idx+1+length]
-
-		idx += 1 + length
-
-		if buffer[idx] == 0x00 {
-			s += string(name)
-
-			idx++
+		// length 192 indicates a pointer
+		if length == 192 {
+			// pointer to a string
+			suffix, _ := decodeDomainName(int(buffer[idx+1]))
+			s += suffix
+			idx += 2
 			break
 		} else {
-			s += string(name) + "."
+			name := buffer[idx+1 : idx+1+length]
+
+			idx += 1 + length
+
+			if buffer[idx] == 0x00 {
+				s += string(name)
+
+				idx++
+				break
+			} else {
+				s += string(name) + "."
+			}
 		}
 	}
 	return s, idx - offset
 }
 
 func decodeAnswer(answer []byte, offset int) (Answer, int, error) {
-	pointerBits := (answer[0] >> 6) & 0b11
-	name := ""
-	idx := 2
-	if pointerBits == 3 {
-		// decode pointer stored in 14 LSBs
-		fmt.Printf("%b\n", answer[:2])
-		offset := binary.BigEndian.Uint16(answer[:2]) & 0x3FFF
-		fmt.Println("pointer offset", offset)
-		fmt.Println()
-		name, _ = decodeDomainName(int(offset))
-	} else if pointerBits == 0 {
-		name, idx = decodeDomainName(offset)
-	} else {
-		fmt.Println("Error.")
-		return Answer{}, 0, fmt.Errorf("Unexpected pointer bits in answer. Only '00' and '11' are supported.")
-	}
-
+	name, idx := decodeDomainName(offset)
 	qType := binary.BigEndian.Uint16(answer[idx : 2+idx])
 	qClass := binary.BigEndian.Uint16(answer[2+idx : 4+idx])
 	ttl := binary.BigEndian.Uint32(answer[4+idx : 8+idx])
@@ -174,6 +167,9 @@ func decodeAnswer(answer []byte, offset int) (Answer, int, error) {
 func printBinary(payload []byte) {
 	for i, b := range payload {
 		// Print each byte in binary format
+		if i%2 == 0 {
+			fmt.Printf("%d    ", i/2)
+		}
 		fmt.Printf("%08b ", b)
 
 		// Add a new line every 2 bytes to make it 16 bits per row
@@ -291,6 +287,8 @@ func main() {
 		fmt.Printf("response ar: %+v\n", answer)
 	}
 
-	s, _ := decodeDomainName(23)
+	s, _ := decodeDomainName(76)
 	fmt.Println(s)
+	// fmt.Printf("%b\n", buffer[76:100])
+	printBinary(buffer)
 }
