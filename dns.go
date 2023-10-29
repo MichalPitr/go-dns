@@ -139,21 +139,20 @@ func decodeDomainName(offset int) (string, int) {
 
 	for {
 		length := int(buffer[idx])
+		fmt.Println("Len: ", length)
 		// length 192 indicates a pointer
 		if length == 192 {
 			// pointer to a string
 			suffix, _ := decodeDomainName(int(buffer[idx+1]))
+			fmt.Println("Pointer at idx:", int(buffer[idx+1]), suffix)
 			s += suffix
 			idx += 2
 			break
 		} else {
 			name := buffer[idx+1 : idx+1+length]
-
 			idx += 1 + length
-
 			if buffer[idx] == 0x00 {
 				s += string(name)
-
 				idx++
 				break
 			} else {
@@ -164,15 +163,49 @@ func decodeDomainName(offset int) (string, int) {
 	return s, idx - offset
 }
 
+func decodeNSrData(rdata []byte) string {
+	s := ""
+	idx := 0
+	for {
+		length := int(rdata[idx])
+		fmt.Println("Len: ", length)
+		// length 192 indicates a pointer
+		if length == 192 {
+			// pointer to a string in the original response buffer
+			suffix, _ := decodeDomainName(int(rdata[idx+1]))
+			fmt.Println("Pointer at idx:", int(rdata[idx+1]), suffix)
+			s += suffix
+			idx += 2
+			break
+		} else {
+			name := rdata[idx+1 : idx+1+length]
+			idx += 1 + length
+			if rdata[idx] == 0x00 {
+				s += string(name)
+				idx++
+				break
+			} else {
+				s += string(name) + "."
+			}
+		}
+	}
+	return s
+}
+
 func decodeResource(answer []byte, offset int) (Resource, int, error) {
 	name, idx := decodeDomainName(offset)
 	qType := binary.BigEndian.Uint16(answer[idx : 2+idx])
 	qClass := binary.BigEndian.Uint16(answer[2+idx : 4+idx])
 	ttl := binary.BigEndian.Uint32(answer[4+idx : 8+idx])
 	rdLength := binary.BigEndian.Uint16(answer[8+idx : 10+idx])
-	// s, _ := decodeDomainName(10 + idx)
-	// fmt.Println(s)
-	rData := answer[10+idx : 10+uint16(idx)+rdLength]
+
+	rData := []byte{}
+	if qType == 2 && qClass == 1 {
+		rData = []byte(decodeNSrData(answer[10+idx : 10+uint16(idx)+rdLength]))
+		fmt.Println(rData)
+	} else {
+		rData = answer[10+idx : 10+uint16(idx)+rdLength]
+	}
 	a := Resource{
 		Body{
 			question:   name,
