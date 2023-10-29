@@ -87,8 +87,6 @@ func (b Body) encode() ([]byte, error) {
 		idx += 1 + len(s[i])
 	}
 	serialized[idx] = 0
-
-	// Encode the rest of the
 	binary.BigEndian.PutUint16(serialized[size-4:size-2], b.queryType)
 	binary.BigEndian.PutUint16(serialized[size-2:size], b.queryClass)
 
@@ -235,7 +233,7 @@ func printBinary(payload []byte) {
 	}
 }
 
-// Global variables to avoid passing vars around
+// Global variables to avoid passing variables around.
 var buffer = []byte{}
 var verbose = false
 
@@ -253,8 +251,6 @@ func resolveDomainName(domainName string, nameServer string) (string, error) {
 		return "", err
 	}
 
-	// sending udp message
-	// authoritative root name server
 	serverIP := defaultRootNameServer
 
 	// Keep track of servers already queried to avoid cycles.
@@ -332,7 +328,7 @@ func resolveDomainName(domainName string, nameServer string) (string, error) {
 		}
 
 		for i := range additionalRecords {
-			// We have ipv4 address for server that can help resolve the query
+			// We have ipv4 address for server that can help resolve the query.
 			ar := additionalRecords[i]
 			if ar.body.queryType == 1 && ar.body.queryClass == 1 && ar.rdLength == 4 {
 				newIP := fmt.Sprintf("%d.%d.%d.%d", ar.rData[0], ar.rData[1], ar.rData[2], ar.rData[3])
@@ -343,7 +339,7 @@ func resolveDomainName(domainName string, nameServer string) (string, error) {
 			}
 		}
 
-		// Resolve name server's ip
+		// Need to resolve name server's ip address to continue.
 		if len(stack) == 0 {
 			nameServer, err := resolveDomainName(string(authorityRecords[0].rData), serverIP)
 			if err != nil {
