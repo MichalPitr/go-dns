@@ -2,10 +2,30 @@ package main
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
 )
+
+type Stack []string
+
+// Push adds an item to the top of the stack
+func (s *Stack) Push(item string) {
+	*s = append(*s, item)
+}
+
+// Pop removes the item from the top of the stack and returns it
+func (s *Stack) Pop() (string, error) {
+	if len(*s) == 0 {
+		return "", errors.New("pop from empty stack")
+	}
+
+	index := len(*s) - 1   // Get the index of the top most element.
+	element := (*s)[index] // Index into the slice and obtain the element.
+	*s = (*s)[:index]      // Remove it from the stack by slicing it off.
+	return element, nil
+}
 
 type Query struct {
 	header Header
@@ -150,6 +170,8 @@ func decodeResource(answer []byte, offset int) (Resource, int, error) {
 	qClass := binary.BigEndian.Uint16(answer[2+idx : 4+idx])
 	ttl := binary.BigEndian.Uint32(answer[4+idx : 8+idx])
 	rdLength := binary.BigEndian.Uint16(answer[8+idx : 10+idx])
+	// s, _ := decodeDomainName(10 + idx)
+	// fmt.Println(s)
 	rData := answer[10+idx : 10+uint16(idx)+rdLength]
 	a := Resource{
 		Body{
@@ -184,14 +206,16 @@ func printBinary(payload []byte) {
 	}
 }
 
+// Global variable so that we don't have to pass it around
 var buffer = []byte{}
 
 func main() {
 	//             Header            |||                  Body Message            || Qtype, Qclass
 	// 0016 0100 0001 0000 0000 0000 |||  0364 6e73 0667 6f6f 676c 6503 636f 6d00 || 0001 0001
+	domain := "threads.net"
 	q := Query{
 		header: Header{id: 22, flags: 0, qdCount: 1, anCount: 0, nsCount: 0, arCount: 0},
-		body:   Body{question: "dns.google.com", queryType: 1, queryClass: 1},
+		body:   Body{question: domain, queryType: 1, queryClass: 1},
 	}
 	fmt.Printf("query: %+v\n", q)
 	message, err := q.encode()
@@ -200,24 +224,27 @@ func main() {
 		return
 	}
 
-	// fmt.Println(message)
-	// for _, b := range message {
-	// 	fmt.Printf("%02X ", b)
-	// }
-	// fmt.Println()
-
 	// sending udp message
 	// authoritative root name server
-	serverIP := "198.41.0.4:53"
+	serverIP := "192.203.230.10"
+	visited := map[string]struct{}{}
+	visited[serverIP] = struct{}{}
+	stack := Stack{serverIP}
 
-	for {
-		conn, err := net.Dial("udp", serverIP)
+	for len(stack) > 0 {
+		ip, err := stack.Pop()
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		fmt.Println(stack)
+		conn, err := net.Dial("udp", fmt.Sprintf("%s:53", ip))
 		if err != nil {
 			fmt.Println("Error setting up the UDP connection:", err)
 			return
 		}
 		defer conn.Close()
-
+		fmt.Printf("Querying %s for %s\n", ip, domain)
 		_, err = conn.Write(message)
 		if err != nil {
 			fmt.Println("Error sending message:", err)
@@ -236,8 +263,10 @@ func main() {
 			fmt.Println("Error decoding response header", err)
 			return
 		}
-
-		fmt.Printf("%b\n", responseHeader.flags)
+		if responseHeader.anCount+responseHeader.nsCount+responseHeader.arCount == 0 {
+			fmt.Println("No records received from server.")
+			return
+		}
 
 		fmt.Printf("response header: %+v\n", responseHeader)
 		responseBody, size, err := decodeBody(buffer[12:])
@@ -245,14 +274,8 @@ func main() {
 			fmt.Println("Error decoding response body", err)
 			return
 		}
-
-		// cache offset of name for decompressing answer section
-		names := map[int]string{}
-		names[12] = responseBody.question
-
 		fmt.Printf("response body: %+v\n", responseBody)
 
-		// printBinary(buffer[12+size:])
 		offset := 12 + size
 		answerRecords := make([]Resource, 0)
 		for i := 0; i < int(responseHeader.anCount); i++ {
@@ -293,13 +316,14 @@ func main() {
 			fmt.Printf("response ar: %+v\n", answer)
 		}
 
-		if len(additionalReconds) > 0 {
-			for i := range additionalReconds {
-				// We have ipv4 address for server that can help resolve the query
-				ar := additionalReconds[i]
-				if ar.body.queryType == 1 && ar.body.queryClass == 1 && ar.rdLength == 4 {
-					serverIP = fmt.Sprintf("%d.%d.%d.%d:53", ar.rData[0], ar.rData[1], ar.rData[2], ar.rData[3])
-					break
+		for i := range additionalReconds {
+			// We have ipv4 address for server that can help resolve the query
+			ar := additionalReconds[i]
+			if ar.body.queryType == 1 && ar.body.queryClass == 1 && ar.rdLength == 4 {
+				newIP := fmt.Sprintf("%d.%d.%d.%d", ar.rData[0], ar.rData[1], ar.rData[2], ar.rData[3])
+				if _, exists := visited[newIP]; !exists {
+					stack.Push(newIP)
+					visited[newIP] = struct{}{}
 				}
 			}
 		}
