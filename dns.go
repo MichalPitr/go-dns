@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 )
 
 type Stack []string
@@ -55,7 +56,7 @@ type Resource struct {
 	rData    []byte
 }
 
-func (h Header) encode() ([]byte, error) {
+func (h *Header) encode() ([]byte, error) {
 	// fixed size of header at 3 bytes
 	serialized := make([]byte, 12)
 	binary.BigEndian.PutUint16(serialized[:2], h.id)
@@ -67,7 +68,7 @@ func (h Header) encode() ([]byte, error) {
 	return serialized, nil
 }
 
-func (b Body) encode() ([]byte, error) {
+func (b *Body) encode() ([]byte, error) {
 	s := strings.Split(b.question, ".")
 	length := 0
 	for i := range s {
@@ -93,16 +94,14 @@ func (b Body) encode() ([]byte, error) {
 	return serialized, nil
 }
 
-func (q Query) encode() ([]byte, error) {
+func (q *Query) encode() ([]byte, error) {
 	header, err := q.header.encode()
 	if err != nil {
-		fmt.Println(err.Error())
 		return nil, err
 	}
 
 	body, err := q.body.encode()
 	if err != nil {
-		fmt.Println(err.Error())
 		return nil, err
 	}
 
@@ -110,29 +109,33 @@ func (q Query) encode() ([]byte, error) {
 	return combined, nil
 }
 
-func decodeHeader(header []byte) (Header, error) {
+func decodeHeader(header []byte, offset int) (*Header, int, error) {
 	h := Header{
-		id:      binary.BigEndian.Uint16(header[:2]),
-		flags:   binary.BigEndian.Uint16(header[2:4]),
-		qdCount: binary.BigEndian.Uint16(header[4:6]),
-		anCount: binary.BigEndian.Uint16(header[6:8]),
-		nsCount: binary.BigEndian.Uint16(header[8:10]),
-		arCount: binary.BigEndian.Uint16(header[10:12]),
+		id:      binary.BigEndian.Uint16(header[offset : offset+2]),
+		flags:   binary.BigEndian.Uint16(header[offset+2 : offset+4]),
+		qdCount: binary.BigEndian.Uint16(header[offset+4 : offset+6]),
+		anCount: binary.BigEndian.Uint16(header[offset+6 : offset+8]),
+		nsCount: binary.BigEndian.Uint16(header[offset+8 : offset+10]),
+		arCount: binary.BigEndian.Uint16(header[offset+10 : offset+12]),
 	}
-	return h, nil
+	// Return header size for consistency.
+	return &h, 12, nil
 }
 
-func decodeBody(body []byte) (Body, int, error) {
-	name, idx := decodeDomainName(12)
+func decodeBody(buffer []byte, startPosition int) (*Body, int, error) {
+	name, size := decodeDomainName(buffer, startPosition)
+	offset := startPosition + size
 	b := Body{
 		question:   name,
-		queryType:  binary.BigEndian.Uint16(body[idx : idx+2]),
-		queryClass: binary.BigEndian.Uint16(body[idx+2 : idx+4]),
+		queryType:  binary.BigEndian.Uint16(buffer[offset : offset+2]),
+		queryClass: binary.BigEndian.Uint16(buffer[offset+2 : offset+4]),
 	}
-	return b, idx + 4, nil
+
+	// Return size of body since it varies with domain name length.
+	return &b, size + 4, nil
 }
 
-func decodeDomainName(offset int) (string, int) {
+func decodeDomainName(buffer []byte, offset int) (string, int) {
 	s := ""
 	idx := offset
 
@@ -140,8 +143,8 @@ func decodeDomainName(offset int) (string, int) {
 		length := int(buffer[idx])
 		// length 192 indicates a pointer
 		if length == 192 {
-			// pointer to a string
-			suffix, _ := decodeDomainName(int(buffer[idx+1]))
+			// pointer to a string, we discard the length and simply increment idx by 2 to jump over the pointer
+			suffix, _ := decodeDomainName(buffer, int(buffer[idx+1]))
 			s += suffix
 			idx += 2
 			break
@@ -157,10 +160,12 @@ func decodeDomainName(offset int) (string, int) {
 			}
 		}
 	}
+
+	// Second return value indicates by how much buffer pointer (offset) should be incremented.
 	return s, idx - offset
 }
 
-func decodeNSrData(rdata []byte) string {
+func decodeNSrData(buffer, rdata []byte) string {
 	s := ""
 	idx := 0
 	for {
@@ -168,7 +173,7 @@ func decodeNSrData(rdata []byte) string {
 		// length 192 indicates a pointer
 		if length == 192 {
 			// pointer to a string in the original response buffer
-			suffix, _ := decodeDomainName(int(rdata[idx+1]))
+			suffix, _ := decodeDomainName(buffer, int(rdata[idx+1]))
 			s += suffix
 			idx += 2
 			break
@@ -187,18 +192,21 @@ func decodeNSrData(rdata []byte) string {
 	return s
 }
 
-func decodeResource(answer []byte, offset int) (Resource, int, error) {
-	name, idx := decodeDomainName(offset)
-	qType := binary.BigEndian.Uint16(answer[idx : 2+idx])
-	qClass := binary.BigEndian.Uint16(answer[2+idx : 4+idx])
-	ttl := binary.BigEndian.Uint32(answer[4+idx : 8+idx])
-	rdLength := binary.BigEndian.Uint16(answer[8+idx : 10+idx])
+func decodeResource(buffer []byte, startPosition int) (*Resource, int, error) {
+	// Could either be a pointer, inlined name or combination.
+	name, size := decodeDomainName(buffer, startPosition)
+	offset := startPosition + size
+
+	qType := binary.BigEndian.Uint16(buffer[offset : offset+2])
+	qClass := binary.BigEndian.Uint16(buffer[offset+2 : 4+offset])
+	ttl := binary.BigEndian.Uint32(buffer[offset+4 : offset+8])
+	rdLength := binary.BigEndian.Uint16(buffer[8+offset : 10+offset])
 
 	rData := []byte{}
 	if qType == 2 && qClass == 1 {
-		rData = []byte(decodeNSrData(answer[10+idx : 10+uint16(idx)+rdLength]))
+		rData = []byte(decodeNSrData(buffer, buffer[10+offset:10+offset+int(rdLength)]))
 	} else {
-		rData = answer[10+idx : 10+uint16(idx)+rdLength]
+		rData = buffer[10+offset : 10+uint16(offset)+rdLength]
 	}
 	a := Resource{
 		Body{
@@ -210,15 +218,17 @@ func decodeResource(answer []byte, offset int) (Resource, int, error) {
 		rdLength,
 		rData,
 	}
-	return a, idx + int(10+rdLength), nil
+
+	// Return length of the section so that caller can update buffer position.
+	endPosition := offset + 10 + int(rdLength)
+	return &a, endPosition - startPosition, nil
 }
 
-func printBinary(payload []byte) {
-	for i, b := range payload {
+func printBinary(arr []byte) {
+	for i, b := range arr {
 		// Print each byte in binary format
-		if i%2 == 0 {
-			fmt.Printf("%d    ", i/2)
-		}
+		fmt.Printf("%d    ", i)
+
 		fmt.Printf("%08b ", b)
 
 		// Add a new line every 2 bytes to make it 16 bits per row
@@ -228,15 +238,12 @@ func printBinary(payload []byte) {
 	}
 
 	// Handle the case where the length of byteArray is odd
-	if len(payload)%2 != 0 {
+	if len(arr)%2 != 0 {
 		fmt.Println()
 	}
 }
 
 // Global variables to avoid passing variables around.
-var buffer = []byte{}
-var verbose = false
-
 const udpMaxPacketSize = 512
 const defaultRootNameServer = "192.203.230.10"
 
@@ -275,13 +282,17 @@ func resolveDomainName(domainName string, nameServer string) (string, error) {
 			return "", err
 		}
 
-		buffer = make([]byte, udpMaxPacketSize)
+		buffer := make([]byte, udpMaxPacketSize)
 		_, err = conn.Read(buffer)
 		if err != nil {
 			return "", err
 		}
 
-		responseHeader, err := decodeHeader(buffer[:12])
+		bufferPosition := 0
+		responseHeader, size, err := decodeHeader(buffer, bufferPosition)
+		bufferPosition += size
+
+		// TODO cleanup error handling and asserting it's the correct response., move buffer increment after error checking.
 		if err != nil {
 			return "", err
 		}
@@ -292,39 +303,40 @@ func resolveDomainName(domainName string, nameServer string) (string, error) {
 		if responseHeader.anCount+responseHeader.nsCount+responseHeader.arCount == 0 {
 			return "", fmt.Errorf("No records received from server.")
 		}
+		// End TODO
 
-		responseBody, size, err := decodeBody(buffer[12:])
+		responseBody, size, err := decodeBody(buffer, 12)
 		if err != nil || responseBody.question != q.body.question {
 			return "", err
 		}
+		bufferPosition += size
 
-		offset := 12 + size
 		for i := 0; i < int(responseHeader.anCount); i++ {
-			answer, _, err := decodeResource(buffer[offset:], offset)
+			answer, _, err := decodeResource(buffer, bufferPosition)
 			if err != nil {
 				return "", err
 			}
 			return fmt.Sprintf("%d.%d.%d.%d", answer.rData[0], answer.rData[1], answer.rData[2], answer.rData[3]), nil
 		}
 
-		authorityRecords := make([]Resource, 0)
+		authorityRecords := make([]*Resource, 0)
 		for i := 0; i < int(responseHeader.nsCount); i++ {
-			answer, size, err := decodeResource(buffer[offset:], offset)
+			answer, size, err := decodeResource(buffer, bufferPosition)
 			if err != nil {
 				return "", err
 			}
 			authorityRecords = append(authorityRecords, answer)
-			offset += size
+			bufferPosition += size
 		}
 
-		additionalRecords := make([]Resource, 0)
+		additionalRecords := make([]*Resource, 0)
 		for i := 0; i < int(responseHeader.arCount); i++ {
-			answer, size, err := decodeResource(buffer[offset:], offset)
+			answer, size, err := decodeResource(buffer, bufferPosition)
 			if err != nil {
 				return "", err
 			}
 			additionalRecords = append(additionalRecords, answer)
-			offset += size
+			bufferPosition += size
 		}
 
 		for i := range additionalRecords {
@@ -353,6 +365,7 @@ func resolveDomainName(domainName string, nameServer string) (string, error) {
 }
 
 func main() {
+	start := time.Now().UnixMicro()
 	args := os.Args[1:]
 	if len(args) != 1 {
 		fmt.Println("Usage: ./dns domain")
@@ -366,5 +379,7 @@ func main() {
 	}
 
 	fmt.Println(domain)
+	end := time.Now().UnixMicro()
+	fmt.Println("Time taken:", end-start)
 	return
 }
