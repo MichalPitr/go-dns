@@ -56,6 +56,18 @@ type Resource struct {
 	rData    []byte
 }
 
+func checkHeader(responseHeader *Header, query *Query) {
+	if responseHeader.id != query.header.id {
+		fmt.Fprintf(os.Stderr, "Expected response with id '%d' but got '%d' instead.\n", query.header.id, responseHeader.id)
+		os.Exit(1)
+	}
+
+	if responseHeader.anCount+responseHeader.nsCount+responseHeader.arCount == 0 {
+		fmt.Fprintf(os.Stderr, "No records received from server.\n")
+		os.Exit(1)
+	}
+}
+
 func (h *Header) encode() ([]byte, error) {
 	// fixed size of header at 3 bytes
 	serialized := make([]byte, 12)
@@ -125,14 +137,14 @@ func decodeHeader(header []byte, offset int) (*Header, int, error) {
 func decodeBody(buffer []byte, startPosition int) (*Body, int, error) {
 	name, size := decodeDomainName(buffer, startPosition)
 	offset := startPosition + size
-	b := Body{
+	body := Body{
 		question:   name,
 		queryType:  binary.BigEndian.Uint16(buffer[offset : offset+2]),
 		queryClass: binary.BigEndian.Uint16(buffer[offset+2 : offset+4]),
 	}
 
 	// Return size of body since it varies with domain name length.
-	return &b, size + 4, nil
+	return &body, size + 4, nil
 }
 
 func decodeDomainName(buffer []byte, offset int) (string, int) {
@@ -208,7 +220,7 @@ func decodeResource(buffer []byte, startPosition int) (*Resource, int, error) {
 	} else {
 		rData = buffer[10+offset : 10+uint16(offset)+rdLength]
 	}
-	a := Resource{
+	resource := Resource{
 		Body{
 			question:   name,
 			queryType:  qType,
@@ -221,7 +233,7 @@ func decodeResource(buffer []byte, startPosition int) (*Resource, int, error) {
 
 	// Return length of the section so that caller can update buffer position.
 	endPosition := offset + 10 + int(rdLength)
-	return &a, endPosition - startPosition, nil
+	return &resource, endPosition - startPosition, nil
 }
 
 func printBinary(arr []byte) {
@@ -248,12 +260,12 @@ const udpMaxPacketSize = 512
 const defaultRootNameServer = "192.203.230.10"
 
 func resolveDomainName(domainName string, nameServer string) (string, error) {
-	q := Query{
+	query := Query{
 		header: Header{id: 22, flags: 0, qdCount: 1, anCount: 0, nsCount: 0, arCount: 0},
 		body:   Body{question: domainName, queryType: 1, queryClass: 1},
 	}
 
-	message, err := q.encode()
+	message, err := query.encode()
 	if err != nil {
 		return "", err
 	}
@@ -270,6 +282,7 @@ func resolveDomainName(domainName string, nameServer string) (string, error) {
 		if err != nil {
 			return "", err
 		}
+
 		conn, err := net.Dial("udp", fmt.Sprintf("%s:53", ip))
 		if err != nil {
 			return "", err
@@ -290,23 +303,14 @@ func resolveDomainName(domainName string, nameServer string) (string, error) {
 
 		bufferPosition := 0
 		responseHeader, size, err := decodeHeader(buffer, bufferPosition)
-		bufferPosition += size
-
-		// TODO cleanup error handling and asserting it's the correct response., move buffer increment after error checking.
 		if err != nil {
 			return "", err
 		}
-		if responseHeader.id != q.header.id {
-			return "", fmt.Errorf("Expected response with id '%d' but got '%d' instead.", q.header.id, responseHeader.id)
-		}
-
-		if responseHeader.anCount+responseHeader.nsCount+responseHeader.arCount == 0 {
-			return "", fmt.Errorf("No records received from server.")
-		}
-		// End TODO
+		checkHeader(responseHeader, &query)
+		bufferPosition += size
 
 		responseBody, size, err := decodeBody(buffer, 12)
-		if err != nil || responseBody.question != q.body.question {
+		if err != nil || responseBody.question != query.body.question {
 			return "", err
 		}
 		bufferPosition += size
@@ -321,21 +325,21 @@ func resolveDomainName(domainName string, nameServer string) (string, error) {
 
 		authorityRecords := make([]*Resource, 0)
 		for i := 0; i < int(responseHeader.nsCount); i++ {
-			answer, size, err := decodeResource(buffer, bufferPosition)
+			authority, size, err := decodeResource(buffer, bufferPosition)
 			if err != nil {
 				return "", err
 			}
-			authorityRecords = append(authorityRecords, answer)
+			authorityRecords = append(authorityRecords, authority)
 			bufferPosition += size
 		}
 
 		additionalRecords := make([]*Resource, 0)
 		for i := 0; i < int(responseHeader.arCount); i++ {
-			answer, size, err := decodeResource(buffer, bufferPosition)
+			additional, size, err := decodeResource(buffer, bufferPosition)
 			if err != nil {
 				return "", err
 			}
-			additionalRecords = append(additionalRecords, answer)
+			additionalRecords = append(additionalRecords, additional)
 			bufferPosition += size
 		}
 
@@ -359,7 +363,6 @@ func resolveDomainName(domainName string, nameServer string) (string, error) {
 			}
 			stack.Push(nameServer)
 		}
-
 	}
 	return "", fmt.Errorf("Failed to resolve this domain name.")
 }
