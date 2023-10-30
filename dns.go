@@ -7,7 +7,6 @@ import (
 	"net"
 	"os"
 	"strings"
-	"time"
 )
 
 type Stack []string
@@ -381,7 +380,6 @@ func resolveDomainName(domainName string, nameServer string) (string, error) {
 }
 
 func main() {
-	start := time.Now().UnixMicro()
 	args := os.Args[1:]
 	if len(args) != 1 {
 		fmt.Println("Usage: ./dns domain")
@@ -395,7 +393,5 @@ func main() {
 	}
 
 	fmt.Println(domain)
-	end := time.Now().UnixMicro()
-	fmt.Println("Time taken:", end-start)
 	return
 }
