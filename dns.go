@@ -62,6 +62,18 @@ func checkHeader(responseHeader *Header, query *Query) {
 		os.Exit(1)
 	}
 
+	switch responseHeader.flags & 0b1111 {
+	case 1:
+		fmt.Fprint(os.Stderr, "There was a format error with the query.\n")
+		os.Exit(1)
+	case 2:
+		fmt.Fprint(os.Stderr, "Server failure - server was unable to process the query.\n")
+		os.Exit(1)
+	case 3:
+		fmt.Fprint(os.Stderr, "This domain name does not exist.\n")
+		os.Exit(0)
+	}
+
 	if responseHeader.anCount+responseHeader.nsCount+responseHeader.arCount == 0 {
 		fmt.Fprintf(os.Stderr, "No records received from server.\n")
 		os.Exit(1)
@@ -356,7 +368,8 @@ func resolveDomainName(domainName string, nameServer string) (string, error) {
 		}
 
 		// Need to resolve name server's ip address to continue.
-		if len(stack) == 0 {
+		if len(stack) == 0 && len(authorityRecords) > 0 {
+			fmt.Println("Querying for name server ip.")
 			nameServer, err := resolveDomainName(string(authorityRecords[0].rData), serverIP)
 			if err != nil {
 				return "", err
